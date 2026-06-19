@@ -11,6 +11,7 @@
     "format": "prettier --write --experimental-cli src/"
   },
   "dependencies": {
+    "lint": "^1.2.2",
     "vue": "^3.5.38"
   },
   "devDependencies": {
