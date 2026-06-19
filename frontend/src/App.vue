@@ -89,10 +89,6 @@ function handleKeyDown(type, event) {
     if (key === 'Backspace') {
       event.preventDefault()
       targetRef.value = Math.floor(targetRef.value / 10)
-      // Reset back to first press state if cleared
-      if (targetRef.value === 0) {
-        isFirstPress[type] = true
-      }
     }
     return
   }
