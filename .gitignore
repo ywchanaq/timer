@@ -1,0 +1,15 @@
+# .gitignore
+# Python
+__pycache__/
+.pytest_cache/
+venv/
+*.pyc
+
+# Node / Vue
+node_modules/
+dist/
+.env.local
+
+# IDEs
+.vscode/
+.idea/
