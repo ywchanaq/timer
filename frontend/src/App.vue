@@ -80,7 +80,7 @@
       </div>
     </div>
 
-    <!-- Folder Config for Random Media Alert (Backend Driven - Now Outside main-card) -->
+    <!-- Folder Config for Random Media Alert (Backend Driven) -->
     <div class="timer-container folder-config-card">
       <div class="config-header">
         <label class="config-label">🔔 Custom MP3/WAV Alarm Folder</label>
@@ -95,7 +95,7 @@
           <button 
             @click="configMode = 'path'" 
             class="toggle-tab" 
-            :class="{ active: activeConfigMode === 'path' || configMode === 'path' }"
+            :class="{ active: configMode === 'path' }"
           >
             Enter Path
           </button>
@@ -153,13 +153,20 @@
 <script setup>
 import { ref, computed, onUnmounted, onMounted, reactive } from 'vue'
 
+// --- DYNAMIC API CONFIGURATION ---
+// Automatically targets the Python backend whether running locally in Vite (port 5173/3000)
+// or packaged directly inside the pywebview executable shell.
+const API_BASE = (window.location.port === '5173' || window.location.port === '3000') 
+  ? 'http://localhost:8000' 
+  : ''
+
 // Basic Reactive Variables
 const inputHours = ref(0)
 const minutesVal = ref(0)
 const secondsVal = ref(0)
 const timerLabel = ref('')
 const savedTimers = ref([])
-const alertFolder = ref('') // Stores the active alert folder path
+const alertFolder = ref('')
 
 const timeLeft = ref(0)
 const isRunning = ref(false)
@@ -220,7 +227,7 @@ function closeConfirm(isConfirmed) {
 
 async function fetchSavedTimers() {
   try {
-    const response = await fetch('http://localhost:8000/api/timers')
+    const response = await fetch(`${API_BASE}/api/timers`)
     if (response.ok) {
       savedTimers.value = await response.json()
     }
@@ -231,7 +238,7 @@ async function fetchSavedTimers() {
 
 async function fetchSavedFolder() {
   try {
-    const response = await fetch('http://localhost:8000/api/config/folder')
+    const response = await fetch(`${API_BASE}/api/config/folder`)
     if (response.ok) {
       const data = await response.json()
       alertFolder.value = data.folder_path
@@ -244,7 +251,7 @@ async function fetchSavedFolder() {
 async function selectFolderViaBackend() {
   loadingFolder.value = true
   try {
-    const response = await fetch('http://localhost:8000/api/config/select-folder', {
+    const response = await fetch(`${API_BASE}/api/config/select-folder`, {
       method: 'POST'
     })
     if (response.ok) {
@@ -268,7 +275,7 @@ async function selectFolderViaBackend() {
 
 async function saveManualPath() {
   try {
-    const response = await fetch('http://localhost:8000/api/config/folder', {
+    const response = await fetch(`${API_BASE}/api/config/folder`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path: alertFolder.value })
@@ -294,7 +301,7 @@ async function storeTimerConfig() {
   }
 
   try {
-    const response = await fetch('http://localhost:8000/api/timers', {
+    const response = await fetch(`${API_BASE}/api/timers`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -319,7 +326,7 @@ async function storeTimerConfig() {
 
 async function deleteTimer(id) {
   try {
-    const res = await fetch(`http://localhost:8000/api/timers/${id}`, {
+    const res = await fetch(`${API_BASE}/api/timers/${id}`, {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' }
     })
@@ -414,7 +421,7 @@ async function startTimer() {
   
   loading.value = true
   try {
-    const response = await fetch('http://localhost:8000/api/timer/start', {
+    const response = await fetch(`${API_BASE}/api/timer/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ duration_seconds: totalSeconds })
@@ -425,10 +432,9 @@ async function startTimer() {
     if (response.ok) {
       timeLeft.value = data.duration
       isRunning.value = true
-      
+
       // Save visually configured mode preference locally
       localStorage.setItem('alertConfigMode', configMode.value)
-      
       startTickerLoop()
     } else {
       showNotification(data.detail || "Failed to start timer")
@@ -448,10 +454,9 @@ function startTickerLoop() {
     if (timeLeft.value > 0) {
       timeLeft.value--
       
-      // Preload audio when countdown gets to 9 or 10 seconds remaining to avoid lag at zero
       if (timeLeft.value <= 10 && !preloaded) {
         preloaded = true
-        fetch('http://localhost:8000/api/alert/preload-backend', { method: 'POST' })
+        fetch(`${API_BASE}/api/alert/preload-backend`, { method: 'POST' })
           .catch(err => console.warn("Preloading failed", err))
       }
       
@@ -472,7 +477,7 @@ async function triggerAlertSound() {
   
   try {
     // Call the POST backend audio engine play route directly
-    const response = await fetch('http://localhost:8000/api/alert/play-backend', {
+    const response = await fetch(`${API_BASE}/api/alert/play-backend`, {
       method: 'POST'
     })
     
@@ -496,7 +501,7 @@ async function resetTimer() {
   
   // Call backend stop command instantly to stop native pygame audio playback
   try {
-    await fetch('http://localhost:8000/api/alert/stop-backend', {
+    await fetch(`${API_BASE}/api/alert/stop-backend`, {
       method: 'POST'
     })
   } catch (err) {
