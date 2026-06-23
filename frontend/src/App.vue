@@ -1,84 +1,134 @@
 <template>
-  <div class="app-layout">
-    <!-- Main Countdown Card -->
-    <div class="timer-container main-card">
-      <h1 class="main-title">⏱️ Timer</h1>
-      
-      <!-- Input Mode -->
-      <div v-if="!isRunning" class="input-form">
-        <div class="input-row">
-          <div class="input-group">
-            <label>HH</label>
-            <input v-model.number="inputHours" type="number" min="0" max="999" placeholder="00" />
+  <div class="app-wrapper">
+    <div class="app-layout">
+      <!-- Main Countdown Card -->
+      <div class="timer-container main-card">
+        <h1 class="main-title">⏱️ Timer</h1>  
+
+        <!-- Input Mode -->
+        <div v-if="!isRunning" class="input-form">
+          <div class="input-row">
+            <div class="input-group">
+              <label>HH</label>
+              <input v-model.number="inputHours" type="number" min="0" max="999" placeholder="00" />
+            </div>
+            <span class="separator">:</span>
+            
+            <div class="input-group">
+              <label>MM</label>
+              <input 
+                :value="displayMinutes" 
+                @keydown="handleKeyDown('minutes', $event)"
+                type="text" 
+                inputmode="numeric"
+                placeholder="00" 
+              />
+            </div>
+            <span class="separator">:</span>
+            
+            <div class="input-group">
+              <label>SS</label>
+              <input 
+                :value="displaySeconds" 
+                @keydown="handleKeyDown('seconds', $event)"
+                type="text" 
+                inputmode="numeric"
+                placeholder="00" 
+              />
+            </div>
           </div>
-          <span class="separator">:</span>
           
-          <div class="input-group">
-            <label>MM</label>
-            <input 
-              :value="displayMinutes" 
-              @keydown="handleKeyDown('minutes', $event)"
-              type="text" 
-              inputmode="numeric"
-              placeholder="00" 
-            />
+          <button @click="startTimer" class="btn-start">Start Timer</button>
+        </div>
+
+        <!-- Live Countdown Screen -->
+        <div v-else class="ticker-screen">
+          <div class="countdown-display" :class="{ 'time-up': timeLeft === 0 }">
+            {{ formattedTime }}
           </div>
-          <span class="separator">:</span>
-          
-          <div class="input-group">
-            <label>SS</label>
-            <input 
-              :value="displaySeconds" 
-              @keydown="handleKeyDown('seconds', $event)"
-              type="text" 
-              inputmode="numeric"
-              placeholder="00" 
-            />
-          </div>
+          <button @click="resetTimer" class="btn-reset">Reset</button>
+        </div>
+
+        <div v-if="loading" class="status-msg">
+          <span class="spinner"></span> Connecting to backend...
+        </div>
+      </div>
+
+      <!-- Presets Management Card -->
+      <div class="timer-container side-card stored-section">
+        <h3>💾 Stored Presets</h3>
+        
+        <div class="save-row">
+          <input 
+            v-model="timerLabel" 
+            type="text" 
+            placeholder="Timer Name (e.g. Pomodoro)" 
+            class="label-input" 
+            @keyup.enter="storeTimerConfig"
+          />
+          <button @click="storeTimerConfig" class="btn-save">Save Setup</button>
         </div>
         
-        <button @click="startTimer" class="btn-start">Start Timer</button>
+        <p v-if="savedTimers.length === 0" class="empty-msg">No stored presets found.</p>
+        <ul class="timers-list" v-else>
+          <li v-for="timer in savedTimers" :key="timer.id" @click="loadPreset(timer)">
+            <span class="preset-name">★ {{ timer.label }}</span>
+            <span class="preset-duration">{{ formatSecondsToHMS(timer.duration_seconds) }}</span>
+            <button @click.stop="confirmDelete(timer)" class="btn-delete-row" title="Delete Preset">🗑️</button>
+          </li>
+        </ul>
       </div>
+    </div>
 
-      <!-- Live Countdown Screen -->
-      <div v-else class="ticker-screen">
-        <div class="countdown-display" :class="{ 'time-up': timeLeft === 0 }">
-          {{ formattedTime }}
+    <!-- Folder Config for Random Media Alert (Backend Driven - Now Outside main-card) -->
+    <div class="timer-container folder-config-card">
+      <div class="config-header">
+        <label class="config-label">🔔 Custom MP3/WAV Alarm Folder</label>
+        <div class="mode-toggle">
+          <button 
+            @click="configMode = 'picker'" 
+            class="toggle-tab" 
+            :class="{ active: configMode === 'picker' }"
+          >
+            Select Folder
+          </button>
+          <button 
+            @click="configMode = 'path'" 
+            class="toggle-tab" 
+            :class="{ active: activeConfigMode === 'path' || configMode === 'path' }"
+          >
+            Enter Path
+          </button>
         </div>
-        <button @click="resetTimer" class="btn-reset">Reset</button>
       </div>
 
-      <div v-if="loading" class="status-msg">
-        <span class="spinner"></span> Connecting to backend...
-      </div>
-    </div>
+      <p class="config-help">
+        {{ configMode === 'picker' 
+            ? 'Select a folder containing .mp3 or .wav files on your computer via the backend picker. This will not slow down your browser.' 
+            : 'Enter an absolute directory path on your backend server containing .mp3 or .wav files.' 
+        }}
+      </p>
 
-    <!-- Presets Management Card -->
-    <div class="timer-container side-card stored-section">
-      <h3>💾 Stored Presets</h3>
-      
-      <div class="save-row">
+      <!-- Mode 1: Backend Native Directory Picker -->
+      <div v-if="configMode === 'picker'" class="picker-controls">
+        <button @click="selectFolderViaBackend" class="btn-folder-select" :disabled="loadingFolder">
+          📁 {{ loadingFolder ? 'Opening Dialog...' : (alertFolder || 'Choose Alert Folder via Backend...') }}
+        </button>
+      </div>
+
+      <!-- Mode 2: Absolute Text Path Input -->
+      <div v-else class="path-controls">
         <input 
-          v-model="timerLabel" 
+          v-model="alertFolder" 
           type="text" 
-          placeholder="Timer Name (e.g. Pomodoro)" 
-          class="label-input" 
-          @keyup.enter="storeTimerConfig"
+          placeholder="e.g. C:\Users\Username\Music or /home/user/alarms" 
+          class="folder-input" 
+          @change="saveManualPath"
         />
-        <button @click="storeTimerConfig" class="btn-save">Save Setup</button>
       </div>
-      
-      <p v-if="savedTimers.length === 0" class="empty-msg">No stored presets found.</p>
-      <ul class="timers-list" v-else>
-        <li v-for="timer in savedTimers" :key="timer.id" @click="loadPreset(timer)">
-          <span class="preset-name">★ {{ timer.label }}</span>
-          <span class="preset-duration">{{ formatSecondsToHMS(timer.duration_seconds) }}</span>
-          <button @click.stop="confirmDelete(timer)" class="btn-delete-row" title="Delete Preset">🗑️</button>
-        </li>
-      </ul>
     </div>
 
-    <!-- CUSTOM DIALOGS & NOTIFICATIONS (Replaces browser Alert/Confirm blocks) -->
+    <!-- CUSTOM DIALOGS & NOTIFICATIONS -->
     <Transition name="fade">
       <div v-if="notification" class="custom-notification" :class="notification.type">
         {{ notification.message }}
@@ -109,11 +159,16 @@ const minutesVal = ref(0)
 const secondsVal = ref(0)
 const timerLabel = ref('')
 const savedTimers = ref([])
+const alertFolder = ref('') // Stores the active alert folder path
 
 const timeLeft = ref(0)
 const isRunning = ref(false)
 const loading = ref(false)
+const loadingFolder = ref(false)
 let timerInterval = null
+
+// Configuration Selector (Visual Toggle)
+const configMode = ref('picker') // 'picker' or 'path'
 
 // Custom Notification & Confirmation Modal State
 const notification = ref(null)
@@ -130,6 +185,12 @@ const formattedTime = computed(() => formatSecondsToHMS(timeLeft.value))
 
 onMounted(() => {
   fetchSavedTimers()
+  fetchSavedFolder()
+  
+  const savedMode = localStorage.getItem('alertConfigMode')
+  if (savedMode) {
+    configMode.value = savedMode
+  }
 })
 
 // Utility: Trigger a custom elegant overlay notification banner
@@ -165,6 +226,58 @@ async function fetchSavedTimers() {
     }
   } catch (error) {
     console.error("Failed to fetch stored configs:", error)
+  }
+}
+
+async function fetchSavedFolder() {
+  try {
+    const response = await fetch('http://localhost:8000/api/config/folder')
+    if (response.ok) {
+      const data = await response.json()
+      alertFolder.value = data.folder_path
+    }
+  } catch (error) {
+    console.error("Failed to fetch stored folder config:", error)
+  }
+}
+
+async function selectFolderViaBackend() {
+  loadingFolder.value = true
+  try {
+    const response = await fetch('http://localhost:8000/api/config/select-folder', {
+      method: 'POST'
+    })
+    if (response.ok) {
+      const data = await response.json()
+      if (data.status === 'success' && data.folder_path) {
+        alertFolder.value = data.folder_path
+        showNotification("Folder selected and stored successfully!", "success")
+      } else if (data.status === 'cancelled') {
+        showNotification("Selection cancelled.")
+      }
+    } else {
+      const err = await response.json()
+      showNotification(err.detail || "Error calling folder picker.")
+    }
+  } catch (error) {
+    showNotification("Failed to trigger folder picker. Is backend running?")
+  } finally {
+    loadingFolder.value = false
+  }
+}
+
+async function saveManualPath() {
+  try {
+    const response = await fetch('http://localhost:8000/api/config/folder', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: alertFolder.value })
+    })
+    if (response.ok) {
+      showNotification("Path stored on backend.", "success")
+    }
+  } catch (error) {
+    showNotification("Failed to save path to backend server.")
   }
 }
 
@@ -312,6 +425,10 @@ async function startTimer() {
     if (response.ok) {
       timeLeft.value = data.duration
       isRunning.value = true
+      
+      // Save visually configured mode preference locally
+      localStorage.setItem('alertConfigMode', configMode.value)
+      
       startTickerLoop()
     } else {
       showNotification(data.detail || "Failed to start timer")
@@ -326,19 +443,65 @@ async function startTimer() {
 
 function startTickerLoop() {
   clearInterval(timerInterval)
+  let preloaded = false
   timerInterval = setInterval(() => {
     if (timeLeft.value > 0) {
       timeLeft.value--
+      
+      // Preload audio when countdown gets to 9 or 10 seconds remaining to avoid lag at zero
+      if (timeLeft.value <= 10 && !preloaded) {
+        preloaded = true
+        fetch('http://localhost:8000/api/alert/preload-backend', { method: 'POST' })
+          .catch(err => console.warn("Preloading failed", err))
+      }
+      
+      if (timeLeft.value === 0) {
+        triggerAlertSound()
+      }
     } else {
       clearInterval(timerInterval)
     }
   }, 1000)
 }
 
-function resetTimer() {
+async function triggerAlertSound() {
+  if (!alertFolder.value || !alertFolder.value.trim()) {
+    showNotification("Timer is up! (No alert folder configured in backend)", "success")
+    return
+  }
+  
+  try {
+    // Call the POST backend audio engine play route directly
+    const response = await fetch('http://localhost:8000/api/alert/play-backend', {
+      method: 'POST'
+    })
+    
+    if (!response.ok) {
+      const errData = await response.json()
+      showNotification(errData.detail || "Failed to play audio on backend.", "error")
+    } else {
+      const successData = await response.json()
+      showNotification(`Playing alert: ${successData.file}`, "success")
+    }
+  } catch (err) {
+    console.warn("Backend audio execution failed:", err)
+    showNotification("Failed to communicate with backend audio player.", "error")
+  }
+}
+
+async function resetTimer() {
   clearInterval(timerInterval)
   timeLeft.value = 0
   isRunning.value = false
+  
+  // Call backend stop command instantly to stop native pygame audio playback
+  try {
+    await fetch('http://localhost:8000/api/alert/stop-backend', {
+      method: 'POST'
+    })
+  } catch (err) {
+    console.warn("Failed to stop backend music:", err)
+  }
 }
 
 onUnmounted(() => {
@@ -347,33 +510,32 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.app-wrapper {
+  max-width: 1024px;
+  margin: 40px auto;
+  padding: 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 30px;
+  box-sizing: border-box;
+}
+
 .app-layout {
   display: flex;
   gap: 30px;
   width: 100%;
-  margin: 40px auto;
-  padding: 0 20px;
   align-items: stretch;
   box-sizing: border-box;
-  position: relative;
-}
-
-@media (min-width: 1025px) {
-  .app-layout {
-    max-width: 1024px;
-  }
-}
-
-@media (max-width: 1024px) {
-  .app-layout {
-    max-width: 100%;
-  }
 }
 
 @media (max-width: 768px) {
   .app-layout {
     flex-direction: column;
+    gap: 20px;
+  }
+  .app-wrapper {
     margin: 20px auto;
+    gap: 20px;
   }
 }
 
@@ -395,6 +557,12 @@ onUnmounted(() => {
 
 .side-card {
   flex: 1;
+}
+
+.folder-config-card {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 25px 35px;
 }
 
 .main-title {
@@ -467,6 +635,101 @@ input[type="text"] {
   color: #3f3f46;
   margin: -4px 10px 0 10px;
   font-family: 'Courier New', monospace;
+}
+
+.config-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.config-label {
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: #a1a1aa;
+  letter-spacing: 0.5px;
+}
+
+.mode-toggle {
+  display: flex;
+  background: #121212;
+  border: 1px solid #262626;
+  border-radius: 6px;
+  padding: 2px;
+}
+
+.toggle-tab {
+  font-size: 0.7rem;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: transparent;
+  color: #71717a;
+  cursor: pointer;
+  border: none;
+  font-weight: bold;
+  transition: all 0.2s ease;
+}
+
+.toggle-tab.active {
+  background: #2e2e2e;
+  color: #42b883;
+}
+
+.config-help {
+  font-size: 0.75rem;
+  color: #71717a;
+  margin: 0 0 14px 0;
+  line-height: 1.4;
+}
+
+/* File Picker UI Styling */
+.picker-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.btn-folder-select {
+  background: #121212;
+  border: 1px solid #262626;
+  color: #e4e4e7;
+  padding: 12px 20px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  text-align: left;
+  flex: 1;
+  transition: all 0.2s ease;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btn-folder-select:hover:not(:disabled) {
+  border-color: #42b883;
+  background: #181818;
+}
+
+.btn-folder-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.folder-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #121212;
+  border: 1px solid #262626;
+  color: #fff;
+  padding: 12px 16px;
+  border-radius: 8px;
+  font-size: 0.9rem;
+  transition: border-color 0.2s;
+}
+
+.folder-input:focus {
+  outline: none;
+  border-color: #42b883;
 }
 
 .save-row {
@@ -572,11 +835,11 @@ button {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  height: 360px;
-  overflow-y: scroll;
-  padding-right: 4px; /* Space to keep layout clean when scrollbar appears */
+  
+  /* Responsive Scroll Setup */
   max-height: 280px; /* Base height for tablets / small screens */
-
+  overflow-y: auto;
+  padding-right: 4px; /* Space to keep layout clean when scrollbar appears */
 }
 
 /* Screen-size based adjustments for list height */
@@ -608,7 +871,6 @@ button {
 .timers-list::-webkit-scrollbar-thumb:hover {
   background: #42b883;
 }
-
 
 .timers-list li {
   display: flex;

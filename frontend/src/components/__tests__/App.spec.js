@@ -10,6 +10,19 @@ describe('Countdown Timer & Preset Suite', () => {
   beforeEach(() => {
     fetchMock.mockReset()
     vi.useFakeTimers()
+
+    // --- MOCK LOCALSTORAGE ---
+    let store = {}
+    Object.defineProperty(window, 'localStorage', {
+      value: {
+        getItem: vi.fn((key) => store[key] || null),
+        setItem: vi.fn((key, value) => { store[key] = value.toString() }),
+        clear: vi.fn(() => { store = {} }),
+        removeItem: vi.fn((key) => { delete store[key] })
+      },
+      writable: true,
+      configurable: true
+    })
   })
 
   // --- 1. INITIAL RENDERING & INPUT MAPPING TESTS ---
