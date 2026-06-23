@@ -13,3 +13,4 @@ dist/
 # IDEs
 .vscode/
 .idea/
+backend/timers.db
