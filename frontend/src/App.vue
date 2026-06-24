@@ -128,6 +128,16 @@
       </div>
     </div>
 
+    <!-- Test Minimize-to-Tray -->
+    <!-- 
+    <div class="config-header" >
+      <div class="tray-diagnostic-controls">
+        <button @click="testMinimize" class="btn-test-minimize">🔌 Test Minimize-to-Tray</button>
+        <button @click="checkTrayDiagnostics" class="btn-diagnose">🔍 Diagnostics</button>
+      </div>
+    </div> 
+    -->
+
     <!-- CUSTOM DIALOGS & NOTIFICATIONS -->
     <Transition name="fade">
       <div v-if="notification" class="custom-notification" :class="notification.type">
@@ -508,6 +518,36 @@ async function resetTimer() {
     console.warn("Failed to stop backend music:", err)
   }
 }
+
+// Test Minimize-to-Tray
+// async function testMinimize() {
+//   try {
+//     const response = await fetch(`${API_BASE}/api/window/minimize`, { method: 'POST' })
+//     if (response.ok) {
+//       const data = await response.json()
+//       showNotification(`Result: ${data.message}`, "success")
+//     }
+//   } catch (err) {
+//     showNotification("Failed to trigger test minimize.")
+//   }
+// }
+
+// async function checkTrayDiagnostics() {
+//   try {
+//     const response = await fetch(`${API_BASE}/api/diagnostic/tray`)
+//     if (response.ok) {
+//       const data = await response.json()
+//       if (data.system_tray_active) {
+//         showNotification("Diagnostics: Tray support is active!", "success")
+//       } else {
+//         showNotification(`Diagnostics Failed: ${data.import_failure_reason}`, "error")
+//         console.error("System Tray Failures:", data)
+//       }
+//     }
+//   } catch (err) {
+//     showNotification("Failed to connect to diagnostics API.")
+//   }
+// }
 
 onUnmounted(() => {
   clearInterval(timerInterval)

@@ -11,6 +11,17 @@ import time
 import sqlite3
 import uvicorn
 import webview
+import subprocess
+import urllib.request  # Standard library utility for safe loopback API calling
+from plyer import notification  # Native system notification utility
+
+# PyInstaller Hidden Imports Guard
+# This forces PyInstaller to bundle pystray's Windows backend files during compilation
+TRAY_IMPORT_ERROR = None
+try:
+    import pystray._win32
+except ImportError as e:
+    TRAY_IMPORT_ERROR = str(e)
 
 # Initialize FastAPI App
 app = FastAPI()
@@ -23,6 +34,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# --- Global Window and System Tray References ---
+# Track the pywebview window instance, allowing the API and system tray to control window state
+window = None
+TRAY_AVAILABLE = False
+tray_icon_instance = None
 
 # --- BACKEND AUDIO ENGINE SETUP (Pygame Mixer) ---
 # Pygame's mixer is the standard choice for compiled .exe files (via PyInstaller)
@@ -79,7 +96,179 @@ class FolderPathRequest(BaseModel):
     path: str
 
 
-# --- API ENDPOINTS ---
+# --- Fallback: Native PowerShell Windows Notification ---
+def send_powershell_notification(title, message):
+    """
+    Triggers a native Windows Toast notification using an asynchronous PowerShell subprocess.
+    This acts as a 100% reliable click-interactive fallback inside PyInstaller-packaged executables.
+    When clicked, it sends a REST call back to the local API server to restore the hidden window.
+    """
+    powershell_cmd = f"""
+    [void] [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms")
+    $objTrayIcon = New-Object System.Windows.Forms.NotifyIcon
+    $objTrayIcon.Icon = [System.Drawing.SystemIcons]::Information
+    $objTrayIcon.BalloonTipIcon = "Info"
+    $objTrayIcon.BalloonTipText = "{message}"
+    $objTrayIcon.BalloonTipTitle = "{title}"
+    $objTrayIcon.Visible = $True
+    
+    # Register click event handler to fire HTTP REST restore command back to our FastAPI process
+    Register-ObjectEvent $objTrayIcon BalloonTipClicked BalloonClicked_event -Action {{
+        try {{
+            Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/window/restore" -Method Post
+        }} catch {{}}
+    }}
+    
+    $objTrayIcon.ShowBalloonTip(30000)
+    
+    # Wait for the user to click the notification or let it time out (extended to 30 seconds)
+    Wait-Event -SourceIdentifier BalloonClicked_event -Timeout 30
+    
+    # Cleanup the object reference
+    Unregister-Event -SourceIdentifier BalloonClicked_event -ErrorAction SilentlyContinue
+    $objTrayIcon.Dispose()
+    """
+    try:
+        # Launch PowerShell with a hidden console window to avoid flickering
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        subprocess.Popen(
+            ["powershell", "-Command", powershell_cmd],
+            startupinfo=startupinfo,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
+        print("Clickable PowerShell notification dispatched.")
+    except Exception as e:
+        print(f"PowerShell notification fallback failed: {str(e)}")
+
+
+# --- Helper Function: Trigger System Popup, Notification, and Window Restore ---
+def trigger_alert_popup():
+    """
+    Triggers native OS notification popup.
+    On Windows, we explicitly bypass tray/plyer notifications and use PowerShell
+    directly to guarantee that clicking the notification restores the window.
+    """
+    global window, TRAY_AVAILABLE, tray_icon_instance
+    
+    title = "⏱️ 時間到囉！"
+    message = "您的倒數計時已經完成！點擊此處開啟主畫面。"
+
+    # 1. On Windows, always prioritize PowerShell interactive notification
+    if sys.platform == "win32":
+        send_powershell_notification(title, message)
+        return
+
+    # 2. Non-Windows Tray Handler fallback
+    if TRAY_AVAILABLE and tray_icon_instance:
+        try:
+            tray_icon_instance.notify(
+                message=message,
+                title=title
+            )
+            return
+        except Exception as e:
+            print(f"Failed to send tray notification: {str(e)}")
+            
+    # 3. Non-Windows Plyer Handler fallback
+    try:
+        notification.notify(
+            title=title,
+            message="您的倒數計時已經完成！",
+            app_name="自訂計時器",
+            timeout=10
+        )
+        return
+    except Exception as e:
+        print(f"Plyer notification failed: {str(e)}")
+
+
+# --- System Tray Setup ---
+def create_tray_icon_image():
+    """
+    Uses Pillow (PIL) to dynamically draw a clean, simple clock icon for the system tray.
+    """
+    try:
+        from PIL import Image, ImageDraw
+        # Create a canvas with transparent background
+        image = Image.new('RGBA', (64, 64), color=(0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        # Draw blue circular outer border and clock face
+        draw.ellipse((8, 8, 56, 56), fill=(59, 130, 246, 255), outline=(255, 255, 255, 255), width=4)
+        # Draw clock hands (pointing to 2:00)
+        draw.line((32, 32, 32, 18), fill=(255, 255, 255, 255), width=4)
+        draw.line((32, 32, 46, 32), fill=(255, 255, 255, 255), width=4)
+        return image
+    except Exception as e:
+        print(f"Failed to draw system tray icon: {str(e)}")
+        return None
+
+def setup_system_tray():
+    """
+    Initializes the system tray icon in the taskbar.
+    """
+    global TRAY_AVAILABLE, tray_icon_instance, TRAY_IMPORT_ERROR
+    try:
+        import pystray
+        
+        icon_image = create_tray_icon_image()
+        if not icon_image:
+            return
+            
+        def on_show_window(icon, item):
+            try:
+                # Thread-safe loopback API request to wake up and restore the main window
+                req = urllib.request.Request("http://127.0.0.1:8000/api/window/restore", method="POST")
+                urllib.request.urlopen(req)
+            except Exception as e:
+                print(f"Failed to trigger window restore from tray click: {str(e)}")
+                
+        def on_exit_app(icon, item):
+            icon.stop()
+            if window:
+                try:
+                    window.destroy()
+                except Exception:
+                    pass
+            os._exit(0)
+            
+        # Define right-click context menu
+        menu = pystray.Menu(
+            pystray.MenuItem("開啟主畫面", on_show_window, default=True),
+            pystray.MenuItem("結束程式", on_exit_app)
+        )
+        
+        tray_icon_instance = pystray.Icon("TimerApp", icon_image, "自訂計時器", menu)
+        TRAY_AVAILABLE = True
+        
+        # Start system tray loop in a background daemon thread to avoid blocking main thread UI
+        tray_thread = threading.Thread(target=tray_icon_instance.run, daemon=True)
+        tray_thread.start()
+        print("System Tray support is enabled.")
+    except ImportError as e:
+        TRAY_IMPORT_ERROR = str(e)
+        print("INFO: 'pystray' or 'Pillow' is not installed. Minimizing to system tray is disabled.")
+        print("To enable, run: pip install pystray Pillow")
+    except Exception as e:
+        TRAY_IMPORT_ERROR = str(e)
+        print(f"Failed to enable system tray: {str(e)}")
+
+def on_window_closing():
+    """
+    Intercepts window close events. If system tray is active, hides the window 
+    (maintaining background timer executions) instead of quitting the process.
+    """
+    global TRAY_AVAILABLE
+    if TRAY_AVAILABLE:
+        if window:
+            window.hide()  # Hide window to tray
+            # Send status notification using PowerShell to ensure click-interactive window recovery
+            send_powershell_notification("⏱️ 計時器仍在運行", "應用程式已最小化至系統工作列，計時器仍會在背景為您讀秒！")
+        return False  # Prevent window destruction
+    return True  # Proceed with normal closing if tray is unavailable
+
+
+# --- API Endpoints ---
 @app.get("/api/status")
 def read_status():
     """Simple API healthcheck endpoint."""
@@ -285,7 +474,7 @@ def play_alert_on_backend():
     """
     Plays the alarm. If a file was already preloaded, it starts playing 
     instantly (0ms delay). Otherwise, it fallback-loads a random audio file 
-    and triggers playback.
+    and triggers playback. Also restores/focuses app window and fires native notification.
     """
     global AUDIO_ENGINE_AVAILABLE, PRELOADED_FILE_PATH
     if not AUDIO_ENGINE_AVAILABLE:
@@ -294,7 +483,10 @@ def play_alert_on_backend():
             detail="Backend audio engine (pygame) is not available. Please run: pip install pygame"
         )
 
-    # If the file is already preloaded, trigger play instantly!
+    # 1. Trigger native OS system notification (user clicks it to pop open the window)
+    trigger_alert_popup()
+
+    # 2. If the file is already preloaded, trigger play instantly!
     if PRELOADED_FILE_PATH is not None:
         try:
             pygame.mixer.music.play(-1)  # -1 plays in an infinite loop
@@ -422,6 +614,76 @@ def get_random_alert():
     
     return FileResponse(full_file_path, media_type=mime_type)
 
+
+@app.get("/api/diagnostic/tray")
+def get_tray_diagnostics():
+    """
+    Diagnostic endpoint to determine if pystray/Pillow modules failed to bundle
+    successfully during PyInstaller compilation. Helpful for tracking missing package dependencies.
+    """
+    global TRAY_AVAILABLE, TRAY_IMPORT_ERROR
+    
+    pystray_installed = False
+    pillow_installed = False
+    details = ""
+    
+    try:
+        import pystray
+        pystray_installed = True
+    except Exception as e:
+        details += f"[pystray error: {str(e)}] "
+        
+    try:
+        from PIL import Image
+        pillow_installed = True
+    except Exception as e:
+        details += f"[Pillow/PIL error: {str(e)}] "
+        
+    return {
+        "system_tray_active": TRAY_AVAILABLE,
+        "pystray_imported_successfully": pystray_installed,
+        "pillow_imported_successfully": pillow_installed,
+        "import_failure_reason": TRAY_IMPORT_ERROR or details or "None"
+    }
+
+@app.post("/api/window/minimize")
+def trigger_window_minimize():
+    """
+    Exposed test route that allows the frontend interface to instantly test
+    minimize-to-tray execution on command without needing to click the 'X' button.
+    """
+    global window, TRAY_AVAILABLE
+    if window:
+        try:
+            if TRAY_AVAILABLE:
+                window.hide()
+                send_powershell_notification("⏱️ 計時器仍在運行", "已成功最小化至系統工作列，點擊此處還原！")
+                return {"status": "success", "message": "Hidden to system tray successfully."}
+            else:
+                window.minimize()  # Normal taskbar minimize
+                return {"status": "fallback", "message": "System tray unavailable. Fallback to normal minimize."}
+        except Exception as e:
+            return {"status": "error", "message": f"Minimization trigger failed: {str(e)}"}
+    return {"status": "error", "message": "No active window handle found."}
+
+@app.post("/api/window/restore")
+def restore_window():
+    """
+    API endpoint specifically exposed to allow external processes (like PowerShell notifications
+    or system tray clicks) to safely wake, restore, and focus our packaged pywebview application window.
+    """
+    global window
+    if window:
+        try:
+            window.show()
+            window.restore()
+            window.focus()
+            return {"status": "success", "message": "Window restored and focused."}
+        except Exception as e:
+            return {"status": "error", "message": f"Failed to restore: {str(e)}"}
+    return {"status": "error", "message": "No active window references found."}
+
+
 # --- MOUNT STATIC ASSETS (VUE FRONTEND) ---
 # Resolve the path to the 'dist' folder generated by npm run build
 if getattr(sys, 'frozen', False):
@@ -454,13 +716,19 @@ if __name__ == "__main__":
     
     # 2. Spawn a native desktop GUI frame directing to the running server
     # Configured to look like a clean, responsive desktop interface card
-    webview.create_window(
-        title="⏱️ Custom PyGame Timer App",
+    window = webview.create_window(
+        title="⏱️ 自訂 PyGame 計時器",
         url="http://127.0.0.1:8000",
         width=1000,
         height=750,
         resizable=True
     )
     
-    # 3. Enter the main graphical window loop to prevent python from exiting
+    # 3. Intercept window closing events to minimize to system tray instead of exiting
+    window.events.closing += on_window_closing
+    
+    # 4. Setup the system tray menu and icon configuration
+    setup_system_tray()
+    
+    # 5. Enter the main graphical window loop
     webview.start()

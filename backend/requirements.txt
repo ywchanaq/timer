@@ -28,6 +28,7 @@ orjson==3.11.9
 packaging==26.2
 pefile==2024.8.26
 pluggy==1.6.0
+plyer==2.1.0
 proxy_tools==0.1.0
 pycodestyle==2.12.1
 pycparser==3.0
