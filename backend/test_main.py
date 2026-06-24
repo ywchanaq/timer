@@ -1,6 +1,8 @@
 import os
 import pytest
 import sqlite3
+import tempfile
+import main  # Import the main module to cleanly mock and reset global state
 from fastapi.testclient import TestClient
 
 # Use a separate database file for tests to prevent pollution of production data
@@ -10,6 +12,8 @@ TEST_DB_PATH = "test_timers.db"
 def setup_and_teardown_db(monkeypatch):
     """
     Sets up a clean test database schema before every test and cleans it up after.
+    It builds both presets and system configuration tables, and resets/mocks 
+    global audio state to prevent cross-test pollution.
     """
     # Remove any stale test database
     if os.path.exists(TEST_DB_PATH):
@@ -28,12 +32,38 @@ def setup_and_teardown_db(monkeypatch):
             duration_seconds INTEGER NOT NULL
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS app_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
     conn.commit()
     conn.close()
 
     # Monkeypatch sqlite3.connect inside main to direct queries to our test database
     original_connect = sqlite3.connect
     monkeypatch.setattr(sqlite3, "connect", lambda db_name: original_connect(TEST_DB_PATH))
+
+    # Reset global timer variables in the main module to guarantee isolation between tests
+    monkeypatch.setattr(main, "PRELOADED_FILE_PATH", None)
+
+    # Completely mock pygame to protect test runs from missing local audio configurations or packages
+    class MockMusic:
+        def load(self, path): pass
+        def play(self, loops=-1): pass
+        def stop(self): pass
+        def unload(self): pass
+
+    class MockMixer:
+        music = MockMusic()
+        def init(self): pass
+
+    class MockPygame:
+        mixer = MockMixer()
+
+    monkeypatch.setattr(main, "pygame", MockPygame(), raising=False)
+    monkeypatch.setattr(main, "AUDIO_ENGINE_AVAILABLE", True)
 
     yield
 
@@ -139,3 +169,150 @@ def test_delete_timer_not_found():
     response = client.delete("/api/timers/99999")
     assert response.status_code == 404
     assert "Timer not found" in response.json()["detail"]
+
+
+# --- New App Configuration Endpoints Tests ---
+
+def test_get_stored_folder_empty():
+    """Verify that configuration initially returns an empty directory path."""
+    response = client.get("/api/config/folder")
+    assert response.status_code == 200
+    assert response.json() == {"folder_path": ""}
+
+
+def test_save_and_retrieve_folder_path():
+    """Verify that we can save a custom directory path and then fetch it."""
+    payload = {"path": "/var/mock/alarms"}
+    save_res = client.post("/api/config/folder", json=payload)
+    assert save_res.status_code == 200
+    assert save_res.json()["folder_path"] == "/var/mock/alarms"
+
+    get_res = client.get("/api/config/folder")
+    assert get_res.status_code == 200
+    assert get_res.json() == {"folder_path": "/var/mock/alarms"}
+
+
+# --- New Audio & Media Sandbox Endpoint Tests ---
+
+@pytest.fixture
+def temp_audio_sandbox():
+    """Creates a temporary test directory populated with fake audio files."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        # Create a mock .mp3 and .wav file inside
+        with open(os.path.join(temp_dir, "test_bell.mp3"), "wb") as f:
+            f.write(b"MOCK MP3 DATA")
+        with open(os.path.join(temp_dir, "test_siren.wav"), "wb") as f:
+            f.write(b"MOCK WAV DATA")
+        # Create an unrelated non-media file (should be ignored)
+        with open(os.path.join(temp_dir, "ignore_me.txt"), "w") as f:
+            f.write("text data")
+        yield temp_dir
+
+
+def test_preload_alert_invalid_scenarios():
+    """Tests preload error feedback when no folder path config exists or directory is missing."""
+    # 1. No folder configured
+    res_no_config = client.post("/api/alert/preload-backend")
+    assert res_no_config.status_code == 400
+    assert "No alert folder path configured" in res_no_config.json()["detail"]
+
+    # 2. Folder does not exist
+    client.post("/api/config/folder", json={"path": "/this/path/does/not/exist/on/earth"})
+    res_missing_folder = client.post("/api/alert/preload-backend")
+    assert res_missing_folder.status_code == 400
+    assert "does not exist" in res_missing_folder.json()["detail"]
+
+
+def test_preload_alert_success(temp_audio_sandbox, monkeypatch):
+    """Tests successful random audio preloading using a local file sandbox."""
+    # Seed configuration with temp sandbox directory
+    client.post("/api/config/folder", json={"path": temp_audio_sandbox})
+
+    # Mock pygame loading behavior to avoid system sound crashes
+    monkeypatch.setattr(main.pygame.mixer.music, "load", lambda path: None)
+
+    response = client.post("/api/alert/preload-backend")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "preloaded"
+    # Verify that it picked one of our mock audio files
+    assert data["file"] in ["test_bell.mp3", "test_siren.wav"]
+
+
+def test_play_alert_sequence(temp_audio_sandbox, monkeypatch):
+    """Verifies standard playback flow (including infinite loop activation and reset/stops)."""
+    client.post("/api/config/folder", json={"path": temp_audio_sandbox})
+
+    # Mock all Pygame playback calls directly on the module-level mock to verify executions
+    load_calls = []
+    play_calls = []
+    stop_calls = []
+    unload_calls = []
+
+    monkeypatch.setattr(main.pygame.mixer.music, "load", lambda path: load_calls.append(path))
+    monkeypatch.setattr(main.pygame.mixer.music, "play", lambda loops: play_calls.append(loops))
+    monkeypatch.setattr(main.pygame.mixer.music, "stop", lambda: stop_calls.append(True))
+    monkeypatch.setattr(main.pygame.mixer.music, "unload", lambda: unload_calls.append(True))
+
+    # Test direct playback without preloading
+    play_res = client.post("/api/alert/play-backend")
+    assert play_res.status_code == 200
+    assert play_res.json()["status"] == "playing"
+    assert len(load_calls) == 1
+    assert play_calls == [-1]  # Loop endlessly
+
+    # Test stopping playback
+    stop_res = client.post("/api/alert/stop-backend")
+    assert stop_res.status_code == 200
+    assert stop_res.json()["status"] == "stopped"
+    assert len(stop_calls) == 1
+    assert len(unload_calls) == 1
+
+
+def test_streaming_fallback_alert(temp_audio_sandbox):
+    """Verifies browser-side download fallback (streams files over HTTP with proper MIME types)."""
+    client.post("/api/config/folder", json={"path": temp_audio_sandbox})
+
+    response = client.get("/api/alert/random")
+    assert response.status_code == 200
+    assert response.headers["content-type"] in ["audio/mpeg", "audio/wav"]
+
+
+# --- New GUI Directory Picker Dialogue Mocking ---
+
+def test_select_folder_via_dialogue_success(monkeypatch):
+    """Simulates native folder selections without hanging backend processes in test environments."""
+    # Mock Tkinter GUI component completely
+    class MockTk:
+        def withdraw(self): pass
+        def attributes(self, *args): pass
+        def destroy(self): pass
+
+    monkeypatch.setattr("tkinter.Tk", lambda: MockTk())
+    monkeypatch.setattr("tkinter.filedialog.askdirectory", lambda **kwargs: "/home/user/desktop/audio")
+
+    response = client.post("/api/config/select-folder")
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    assert response.json()["folder_path"] == "/home/user/desktop/audio"
+
+    # Confirm path persisted in config
+    get_res = client.get("/api/config/folder")
+    assert get_res.json()["folder_path"] == "/home/user/desktop/audio"
+
+
+def test_select_folder_via_dialogue_cancelled(monkeypatch):
+    """Simulates user closing the directory picker dialogue window without making a selection."""
+    class MockTk:
+        def withdraw(self): pass
+        def attributes(self, *args): pass
+        def destroy(self): pass
+
+    monkeypatch.setattr("tkinter.Tk", lambda: MockTk())
+    # Return empty string representing cancelled action
+    monkeypatch.setattr("tkinter.filedialog.askdirectory", lambda **kwargs: "")
+
+    response = client.post("/api/config/select-folder")
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["folder_path"] == ""
