@@ -2,6 +2,14 @@ import os
 import pytest
 import sqlite3
 import tempfile
+import sys
+from unittest.mock import MagicMock
+
+# Create a fake pystray module and inject it into sys.modules
+mock_pystray = MagicMock()
+sys.modules['pystray'] = mock_pystray
+sys.modules['pystray._win32'] = MagicMock() # To prevent the line 22 crash
+
 import main  # Import the main module to cleanly mock and reset global state
 from fastapi.testclient import TestClient
 

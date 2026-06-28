@@ -15,3 +15,4 @@ dist/
 .idea/
 backend/timers.db
 backend/build
+backend/test_timers.db
