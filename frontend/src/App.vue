@@ -38,7 +38,7 @@
             </div>
           </div>
           
-          <button @click="startTimer" class="btn-start">Start Timer</button>
+          <button @click="startTimer" class="btn-start" :disabled="loading">Start Timer</button>
         </div>
 
         <!-- Live Countdown Screen -->
@@ -200,6 +200,11 @@ const displayMinutes = computed(() => String(minutesVal.value).padStart(2, '0'))
 const displaySeconds = computed(() => String(secondsVal.value).padStart(2, '0'))
 const formattedTime = computed(() => formatSecondsToHMS(timeLeft.value))
 
+// Consolidated Input Duration Calculation
+const totalInputSeconds = computed(() => {
+  return (inputHours.value * 3600) + (minutesVal.value * 60) + secondsVal.value
+})
+
 onMounted(() => {
   fetchSavedTimers()
   fetchSavedFolder()
@@ -258,23 +263,23 @@ async function fetchSavedFolder() {
   }
 }
 
+// Modernized folder selection via direct IPC Bridge execution
 async function selectFolderViaBackend() {
+  if (!window.pywebview || !window.pywebview.api) {
+    showNotification("Native app window context not fully initialized yet.")
+    return
+  }
+  
   loadingFolder.value = true
   try {
-    const response = await fetch(`${API_BASE}/api/config/select-folder`, {
-      method: 'POST'
-    })
-    if (response.ok) {
-      const data = await response.json()
-      if (data.status === 'success' && data.folder_path) {
-        alertFolder.value = data.folder_path
-        showNotification("Folder selected and stored successfully!", "success")
-      } else if (data.status === 'cancelled') {
-        showNotification("Selection cancelled.")
-      }
-    } else {
-      const err = await response.json()
-      showNotification(err.detail || "Error calling folder picker.")
+    // Call the injected Python API directly bypassing any local FastAPI HTTP overhead
+    const data = await window.pywebview.api.select_folder_dialog()
+    
+    if (data.status === 'success' && data.folder_path) {
+      alertFolder.value = data.folder_path
+      showNotification("Folder directory tracked successfully!", "success")
+    } else if (data.status === 'cancelled') {
+      showNotification("Folder choice cancelled.")
     }
   } catch (error) {
     showNotification("Failed to trigger folder picker. Is backend running?")
@@ -299,13 +304,11 @@ async function saveManualPath() {
 }
 
 async function storeTimerConfig() {
-  const totalSeconds = (inputHours.value * 3600) + (minutesVal.value * 60) + secondsVal.value
-  
   if (!timerLabel.value.trim()) {
     showNotification("Please name your timer before storing it.")
     return
   }
-  if (totalSeconds <= 0) {
+  if (totalInputSeconds.value <= 0) {
     showNotification("Cannot save an empty timer duration.")
     return
   }
@@ -316,7 +319,7 @@ async function storeTimerConfig() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         label: timerLabel.value,
-        duration_seconds: totalSeconds
+        duration_seconds: totalInputSeconds.value
       })
     })
     
@@ -421,10 +424,7 @@ function handleKeyDown(type, event) {
 }
 
 async function startTimer() {
-  // Combine Hours (unchanged) + Sliding Minutes + Sliding Seconds
-  const totalSeconds = (inputHours.value * 3600) + (minutesVal.value * 60) + secondsVal.value
-  
-  if (totalSeconds <= 0) {
+  if (totalInputSeconds.value <= 0) {
     showNotification("Please enter a valid time duration.")
     return
   }
@@ -434,7 +434,9 @@ async function startTimer() {
     const response = await fetch(`${API_BASE}/api/timer/start`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ duration_seconds: totalSeconds })
+      body: JSON.stringify({ 
+        duration_seconds: totalInputSeconds.value,
+      })
     })
     
     const data = await response.json()
@@ -458,7 +460,7 @@ async function startTimer() {
 }
 
 function startTickerLoop() {
-  clearInterval(timerInterval)
+  if (timerInterval) clearInterval(timerInterval)
   let preloaded = false
   timerInterval = setInterval(() => {
     if (timeLeft.value > 0) {
@@ -474,7 +476,10 @@ function startTickerLoop() {
         triggerAlertSound()
       }
     } else {
-      clearInterval(timerInterval)
+      if (timerInterval) {
+        clearInterval(timerInterval)
+        timerInterval = null
+      }
     }
   }, 1000)
 }
@@ -505,7 +510,10 @@ async function triggerAlertSound() {
 }
 
 async function resetTimer() {
-  clearInterval(timerInterval)
+  if (timerInterval) {
+    clearInterval(timerInterval)
+    timerInterval = null
+  }
   timeLeft.value = 0
   isRunning.value = false
   
@@ -550,7 +558,7 @@ async function resetTimer() {
 // }
 
 onUnmounted(() => {
-  clearInterval(timerInterval)
+  if (timerInterval) clearInterval(timerInterval)
 })
 </script>
 

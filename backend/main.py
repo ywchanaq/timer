@@ -61,27 +61,55 @@ PRELOADED_FILE_PATH = None
 
 # --- DATABASE SETUP ---
 def init_db():
-    conn = sqlite3.connect("timers.db")
-    cursor = conn.cursor()
-    # Timers presets table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS stored_timers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            label TEXT NOT NULL,
-            duration_seconds INTEGER NOT NULL
-        )
-    """)
-    # Configuration table for directory paths and other settings
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS app_config (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    conn.close()
+    with sqlite3.connect("timers.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS stored_timers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT NOT NULL,
+                duration_seconds INTEGER NOT NULL
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS app_config (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
+        conn.commit()
 
 init_db()
+
+
+# --- NATIVE JS API BRIDGE (Direct Window-bound IPC) ---
+class ApiBridge:
+    def select_folder_dialog(self):
+        """
+        Invoked directly from frontend via window.pywebview.api.select_folder_dialog()
+        Bypasses HTTP/TCP socket routing entirely for modern, secure desktop interaction.
+        """
+        global window
+        if not window:
+            return {"status": "error", "message": "Window context not found"}
+            
+        # Call native pywebview window frame explorer directory picker
+        selected_folders = window.create_file_dialog(webview.FOLDER_DIALOG)
+        
+        if not selected_folders:
+            return {"status": "cancelled", "folder_path": ""}
+            
+        selected_path = selected_folders[0]
+        
+        # Safely store straight into DB using a context manager
+        with sqlite3.connect("timers.db") as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO app_config (key, value) VALUES ('alert_folder_path', ?)",
+                (selected_path,)
+            )
+            conn.commit()
+            
+        return {"status": "success", "folder_path": selected_path}
 
 
 # --- PYDANTIC DATA MODELS ---
@@ -107,7 +135,6 @@ def send_powershell_notification(title, message):
     [void] [System.Reflection.Assembly]::LoadWithPartialName("System.Windows.Forms")
     $objTrayIcon = New-Object System.Windows.Forms.NotifyIcon
     $objTrayIcon.Icon = [System.Drawing.SystemIcons]::Information
-    $objTrayIcon.BalloonTipIcon = "Info"
     $objTrayIcon.BalloonTipText = "{message}"
     $objTrayIcon.BalloonTipTitle = "{title}"
     $objTrayIcon.Visible = $True
@@ -138,7 +165,7 @@ def send_powershell_notification(title, message):
             creationflags=subprocess.CREATE_NO_WINDOW
         )
         print("Clickable PowerShell notification dispatched.")
-    except Exception as e:
+    except Exception:
         print(f"PowerShell notification fallback failed: {str(e)}")
 
 
@@ -150,7 +177,7 @@ def trigger_alert_popup():
     directly to guarantee that clicking the notification restores the window.
     """
     global window, TRAY_AVAILABLE, tray_icon_instance
-    
+
     title = "⏱️ 時間到囉！"
     message = "您的倒數計時已經完成！點擊此處開啟主畫面。"
 
@@ -297,111 +324,60 @@ def save_timer(request: SaveTimerRequest):
     if request.duration_seconds <= 0:
         raise HTTPException(status_code=400, detail="Duration must be greater than 0 seconds")
         
-    conn = sqlite3.connect("timers.db")
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT INTO stored_timers (label, duration_seconds) VALUES (?, ?)",
-        (clean_label, request.duration_seconds)
-    )
-    conn.commit()
-    conn.close()
+    with sqlite3.connect("timers.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO stored_timers (label, duration_seconds) VALUES (?, ?)",
+            (clean_label, request.duration_seconds)
+        )
+        conn.commit()
     return {"status": "success", "message": "Timer stored successfully!"}
 
 
 @app.get("/api/timers")
 def get_timers():
-    conn = sqlite3.connect("timers.db")
-    conn.row_factory = sqlite3.Row 
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, label, duration_seconds FROM stored_timers ORDER BY id DESC")
-    rows = cursor.fetchall()
-    conn.close()
+    with sqlite3.connect("timers.db") as conn:
+        conn.row_factory = sqlite3.Row 
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, label, duration_seconds FROM stored_timers ORDER BY id DESC")
+        rows = cursor.fetchall()
     
     return [dict(row) for row in rows]
 
 
 @app.delete("/api/timers/{timer_id}")
 def delete_timer(timer_id: int):
-    conn = sqlite3.connect("timers.db")
-    cursor = conn.cursor()
-    
-    # Check if the timer exists
-    cursor.execute("SELECT id FROM stored_timers WHERE id = ?", (timer_id,))
-    if not cursor.fetchone():
-        conn.close()
-        raise HTTPException(status_code=404, detail="Timer not found")
+    with sqlite3.connect("timers.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM stored_timers WHERE id = ?", (timer_id,))
+        conn.commit()
         
-    cursor.execute("DELETE FROM stored_timers WHERE id = ?", (timer_id,))
-    conn.commit()
-    conn.close()
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Timer not found")
+            
     return {"status": "success", "message": f"Timer {timer_id} deleted successfully"}
 
-# --- BACKEND FOLDER STORAGE AND SELECTION ---
 @app.get("/api/config/folder")
 def get_stored_folder():
-    """Retrieves the currently saved folder path from the database."""
-    conn = sqlite3.connect("timers.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT value FROM app_config WHERE key = 'alert_folder_path'")
-    row = cursor.fetchone()
-    conn.close()
+    with sqlite3.connect("timers.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM app_config WHERE key = 'alert_folder_path'")
+        row = cursor.fetchone()
     
-    if row:
-        return {"folder_path": row[0]}
-    return {"folder_path": ""}
+    return {"folder_path": row[0] if row else ""}
 
 @app.post("/api/config/folder")
 def save_folder_path(request: FolderPathRequest):
-    """Manually saves or updates the folder path in the database."""
     clean_path = request.path.strip()
-    conn = sqlite3.connect("timers.db")
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT OR REPLACE INTO app_config (key, value) VALUES ('alert_folder_path', ?)",
-        (clean_path,)
-    )
-    conn.commit()
-    conn.close()
+    with sqlite3.connect("timers.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO app_config (key, value) VALUES ('alert_folder_path', ?)",
+            (clean_path,)
+        )
+        conn.commit()
     return {"status": "success", "folder_path": clean_path}
 
-@app.post("/api/config/select-folder")
-def select_folder_via_dialog():
-    """
-    Opens a native OS directory picker dialog using Python's built-in Tkinter.
-    Saves the selected path directly into SQLite and returns it to the client.
-    """
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-    except ImportError:
-        raise HTTPException(
-            status_code=500, 
-            detail="Tkinter is not installed or supported on this backend environment."
-        )
-
-    # Initialize a hidden Tkinter frame
-    root = tk.Tk()
-    root.withdraw()
-    root.attributes('-topmost', True)  # Bring the directory dialog to front
-    
-    selected_path = filedialog.askdirectory(title="Select Alarm Audio Folder (MP3/WAV)")
-    root.destroy()
-
-    if not selected_path:
-        # User cancelled the selection
-        return {"status": "cancelled", "folder_path": ""}
-
-    # Save to SQLite
-    conn = sqlite3.connect("timers.db")
-    cursor = conn.cursor()
-    cursor.execute(
-        "INSERT OR REPLACE INTO app_config (key, value) VALUES ('alert_folder_path', ?)",
-        (selected_path,)
-    )
-    conn.commit()
-    conn.close()
-
-    return {"status": "success", "folder_path": selected_path}
 
 # --- BACKEND AUDIO CONTROL ENDPOINTS ---
 @app.post("/api/alert/preload-backend")
@@ -418,11 +394,10 @@ def preload_alert_on_backend():
             detail="Backend audio engine (pygame) is not available. Please run: pip install pygame"
         )
 
-    conn = sqlite3.connect("timers.db")
-    cursor = conn.cursor()
-    cursor.execute("SELECT value FROM app_config WHERE key = 'alert_folder_path'")
-    row = cursor.fetchone()
-    conn.close()
+    with sqlite3.connect("timers.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM app_config WHERE key = 'alert_folder_path'")
+        row = cursor.fetchone()
 
     if not row or not row[0].strip():
         raise HTTPException(status_code=400, detail="No alert folder path configured in backend.")
@@ -714,11 +689,15 @@ if __name__ == "__main__":
     server_thread = threading.Thread(target=start_fastapi, daemon=True)
     server_thread.start()
     
+    # Instantiate the bridge pattern
+    api_bridge = ApiBridge()
+    
     # 2. Spawn a native desktop GUI frame directing to the running server
     # Configured to look like a clean, responsive desktop interface card
     window = webview.create_window(
         title="⏱️ 自訂 PyGame 計時器",
         url="http://127.0.0.1:8000",
+        js_api=api_bridge,  # Bind native Python functions to Javascript window.pywebview.api
         width=1000,
         height=750,
         resizable=True

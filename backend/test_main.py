@@ -12,17 +12,10 @@ TEST_DB_PATH = "test_timers.db"
 def setup_and_teardown_db(monkeypatch):
     """
     Sets up a clean test database schema before every test and cleans it up after.
-    It builds both presets and system configuration tables, and resets/mocks 
-    global audio state to prevent cross-test pollution.
+    It builds both presets and system configuration tables, clears stale rows,
+    and resets/mocks global audio state to prevent cross-test pollution.
     """
-    # Remove any stale test database
-    if os.path.exists(TEST_DB_PATH):
-        try:
-            os.remove(TEST_DB_PATH)
-        except OSError:
-            pass
-
-    # Create the schema in the test database
+    # Create the schema if it doesn't exist
     conn = sqlite3.connect(TEST_DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -38,6 +31,10 @@ def setup_and_teardown_db(monkeypatch):
             value TEXT NOT NULL
         )
     """)
+    
+    # CLEAR DATA BEFORE EACH TEST TO PREVENT POLLUTION
+    cursor.execute("DELETE FROM stored_timers")
+    cursor.execute("DELETE FROM app_config")
     conn.commit()
     conn.close()
 
@@ -67,12 +64,16 @@ def setup_and_teardown_db(monkeypatch):
 
     yield
 
-    # Clean up test database file after the test completes
-    if os.path.exists(TEST_DB_PATH):
-        try:
-            os.remove(TEST_DB_PATH)
-        except OSError:
-            pass
+    # Clean up data after the test completes (optional but good practice)
+    try:
+        conn = sqlite3.connect(TEST_DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM stored_timers")
+        cursor.execute("DELETE FROM app_config")
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 
 # Import TestClient with our monkeypatched main module
@@ -276,43 +277,3 @@ def test_streaming_fallback_alert(temp_audio_sandbox):
     response = client.get("/api/alert/random")
     assert response.status_code == 200
     assert response.headers["content-type"] in ["audio/mpeg", "audio/wav"]
-
-
-# --- New GUI Directory Picker Dialogue Mocking ---
-
-def test_select_folder_via_dialogue_success(monkeypatch):
-    """Simulates native folder selections without hanging backend processes in test environments."""
-    # Mock Tkinter GUI component completely
-    class MockTk:
-        def withdraw(self): pass
-        def attributes(self, *args): pass
-        def destroy(self): pass
-
-    monkeypatch.setattr("tkinter.Tk", lambda: MockTk())
-    monkeypatch.setattr("tkinter.filedialog.askdirectory", lambda **kwargs: "/home/user/desktop/audio")
-
-    response = client.post("/api/config/select-folder")
-    assert response.status_code == 200
-    assert response.json()["status"] == "success"
-    assert response.json()["folder_path"] == "/home/user/desktop/audio"
-
-    # Confirm path persisted in config
-    get_res = client.get("/api/config/folder")
-    assert get_res.json()["folder_path"] == "/home/user/desktop/audio"
-
-
-def test_select_folder_via_dialogue_cancelled(monkeypatch):
-    """Simulates user closing the directory picker dialogue window without making a selection."""
-    class MockTk:
-        def withdraw(self): pass
-        def attributes(self, *args): pass
-        def destroy(self): pass
-
-    monkeypatch.setattr("tkinter.Tk", lambda: MockTk())
-    # Return empty string representing cancelled action
-    monkeypatch.setattr("tkinter.filedialog.askdirectory", lambda **kwargs: "")
-
-    response = client.post("/api/config/select-folder")
-    assert response.status_code == 200
-    assert response.json()["status"] == "cancelled"
-    assert response.json()["folder_path"] == ""

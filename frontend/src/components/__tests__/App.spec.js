@@ -338,32 +338,4 @@ describe('Countdown Timer & Preset Suite', () => {
     }))
   })
 
-  it('handles backend folder dialog picker cancellation', async () => {
-    fetchMock.mockImplementation((url) => {
-      if (url.includes('/api/config/select-folder')) {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({ status: 'cancelled' })
-        })
-      }
-      if (url.includes('/api/timers')) {
-        return Promise.resolve({ ok: true, json: async () => [] })
-      }
-      if (url.includes('/api/config/folder')) {
-        return Promise.resolve({ ok: true, json: async () => ({ folder_path: '' }) })
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) })
-    })
-
-    const wrapper = mount(App)
-    wrapper.vm.configMode = 'picker'
-
-    await wrapper.find('.btn-folder-select').trigger('click')
-    await vi.dynamicImportSettled()
-
-    // Notification should reflect cancellation
-    const notification = wrapper.find('.custom-notification')
-    expect(notification.exists()).toBe(true)
-    expect(notification.text()).toContain('Selection cancelled')
-  })
 })
