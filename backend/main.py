@@ -165,7 +165,7 @@ def send_powershell_notification(title, message):
             creationflags=subprocess.CREATE_NO_WINDOW
         )
         print("Clickable PowerShell notification dispatched.")
-    except Exception:
+    except Exception as e:
         print(f"PowerShell notification fallback failed: {str(e)}")
 
 
